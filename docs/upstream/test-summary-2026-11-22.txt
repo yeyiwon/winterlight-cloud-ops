@@ -1,0 +1,16 @@
+# moru-winter-park @ c2fbc3f + metrics-endpoint.patch, 2026-11-22, Node v22.23.2, Python 3.14 / SQLite 3.50.4
+Syntax checked 344 JavaScript modules
+check exit 0
+Built bounded WebSocket Worker; provisioning and secrets are separate deployment steps.
+build exit 0
+# tests 600
+# pass 600
+# fail 0
+# cancelled 0
+# duration_ms 109385.31625
+test exit 0
+ok 243 - public metrics are aggregates only and count sent messages
+ok 244 - metrics bearer rejects short, malformed and wrong tokens
+ok 245 - real Cloudflare runtime: /metrics is disabled without its own token
+ok 246 - real Cloudflare runtime: /metrics is server-to-server, authenticated and live
+ok 321 - frame metrics report measured percentiles and unavailable GPU as null
