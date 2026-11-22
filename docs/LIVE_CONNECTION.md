@@ -1,3 +1,5 @@
+> **2026-11-22 재검증으로 대체됨.** 운영 3개 경로는 실제로 응답을 확인했다. 최신 결과는 [OBSERVABILITY.md](OBSERVABILITY.md), 구조는 [ARCHITECTURE.md](ARCHITECTURE.md). 아래는 2026-11-21 기록이다.
+
 # Live 연결 준비 기록
 
 ## 1. 확인 방법과 결과 요약

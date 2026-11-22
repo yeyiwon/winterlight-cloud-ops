@@ -1,4 +1,4 @@
-# WINTERLIGHT CLOUD OPS v0.1
+# WINTERLIGHT CLOUD OPS v0.2
 
 WINTERLIGHT(`yeyiwon/moru-winter-park`)의 운영 상태를 보는 **별도·읽기 전용** 대시보드. 원본 저장소·배포·DB는 수정하지 않는다. 분석 결과는 [docs/ANALYSIS.md](docs/ANALYSIS.md).
 
@@ -22,21 +22,25 @@ npm test && npm run build
 src/lib/types.ts            스냅샷 스키마 + 출처 타입
 src/lib/adapters/mock.ts    시뮬레이션
 src/lib/adapters/live.ts    읽기 전용 Live 어댑터 (server-only)
-src/lib/service.ts          모드 선택, 5초 캐시(원본·API 부하 억제)
+src/lib/service.ts          모드 선택, 수집 주기·single-flight
+src/lib/monitor.ts          연속 실패→장애, 실패 로그, 타임라인, 시계열
 src/app/api/metrics         GET 전용 (POST 405)
 src/proxy.ts                인증, live fail-closed
 src/app/*                   개요 / 인프라 / 실시간 / 장애 / 비용
 ```
-폴링(3초)은 대시보드 서버 → 브라우저 구간이고, 원본 서비스 호출은 5초 캐시 뒤에서만 일어난다.
+브라우저는 10초(DEMO 3초)마다 새 결과가 있는지 확인하고, 원본 호출은 수집 주기(`METRICS_INTERVAL_SEC`, 30~60초)마다 한 번만 일어난다.
 
-## Live 연동 현황
+## Live 연동 현황 (2026-11-22 운영 실측)
 | 항목 | 상태 |
 |---|---|
-| `/api/health`, `/release.json`, realtime `/health` 프로브 | 구현, 목 응답으로 테스트. 실서비스 호출은 이 환경에서 하지 못함 |
-| Vercel 배포 이력 | 구현, 실계정 미검증 |
-| Cloudflare Workers 요청·오류(최근 1시간) | 구현, **GraphQL 필드명 실계정 미검증** |
-| DO·D1 지표, 접속자·WebSocket·지연 | 미구현 — 원본에 읽기 전용 `/metrics` 추가 및 Cloudflare 쿼리 검증 필요 |
-| 비용 | 미구현 — 연동 필요로 표시 |
+| `/api/health`, `/release.json`, 실시간 `/health` | **운영 연결 확인** (HTTP 200, 버전 웹·API `c2fbc3f`, Worker `6c9fa62`) |
+| 실시간 `/metrics` (접속자·WebSocket·메시지·지연) | 대시보드 구현·테스트 완료. 원본 Worker에 **미배포(404)**: 패치 `docs/upstream/` 승인·배포 대기 |
+| 장애 탐지·복구 기록, 실패 로그, 타임라인 | 구현. 가짜 원본 `/flap`과 자동 테스트로 확인 |
+| Vercel 배포 이력 | 구현. `VERCEL_TOKEN` 없음 → 연동 필요 |
+| Cloudflare Workers 요청·오류 | 구현. 토큰 없음, **GraphQL 필드 실계정 미검증** |
+| D1·DO 사용량, 비용 | 미구현. 검증된 청구 데이터 없이 금액을 표시하지 않음 |
+
+문서: [ARCHITECTURE](docs/ARCHITECTURE.md) · [OBSERVABILITY](docs/OBSERVABILITY.md) · [SECURITY](docs/SECURITY.md) · [INCIDENTS](docs/INCIDENTS.md) · [PERFORMANCE](docs/PERFORMANCE.md) · [RUNBOOK](docs/RUNBOOK.md)
 
 ## 알려진 한계
 - shadcn/ui CLI는 이 개발 환경에서 레지스트리에 접근할 수 없어 설치하지 못했다. 대신 shadcn 관례(`cn()` + 토큰 기반 컴포넌트)로 `src/components/ui.tsx`를 직접 구현했다. Motion도 쓰지 않고 숫자 전환은 자체 tween이다.

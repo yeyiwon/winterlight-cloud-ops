@@ -1,0 +1,137 @@
+diff --git a/realtime/auth.js b/realtime/auth.js
+index 38df19d..d597e3f 100644
+--- a/realtime/auth.js
++++ b/realtime/auth.js
+@@ -8,3 +8,8 @@ export async function verifyTicket(token,secret,now=Date.now()){
+ }
+ export async function signRPC(body,secret){return base64(new Uint8Array(await crypto.subtle.sign('HMAC',await key(secret),enc.encode(body))));}
+ export async function verifyRPC(body,signature,secret){try{return await crypto.subtle.verify('HMAC',await key(secret),bytes(signature),enc.encode(body));}catch{return false;}}
++// Metrics bearer: compared as SHA-256 digests so the check does not leak length or prefix timing.
++export async function verifyBearer(header,secret){
++ if(!secret||secret.length<32||typeof header!=='string'||!header.startsWith('Bearer ')||header.length>300)return false;
++ const [a,b]=await Promise.all([header.slice(7),secret].map(async v=>new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(v)))));let diff=0;for(let i=0;i<a.length;i++)diff|=a[i]^b[i];return diff===0;
++}
+diff --git a/realtime/worker.js b/realtime/worker.js
+index 5c0bac2..48b92d9 100644
+--- a/realtime/worker.js
++++ b/realtime/worker.js
+@@ -1,11 +1,23 @@
+ import {boundedRequest} from '../server/request-body.js';
+-import {verifyTicket,verifyRPC} from './auth.js';
++import {verifyTicket,verifyRPC,verifyBearer} from './auth.js';
+ import {RealtimeWorld} from './world.js';
+-export default{fetch(request,env){const path=new URL(request.url).pathname;if(path==='/health'&&request.method==='GET')return Response.json({ok:true,service:'winterlight-realtime',revision:env.RELEASE_REVISION||'local'},{headers:{'Cache-Control':'no-store'}});if(!['/connect','/rpc'].includes(path))return new Response('Not found',{status:404});return env.WORLD.get(env.WORLD.idFromName('winter-plaza')).fetch(request);}};
++export default{fetch(request,env){const path=new URL(request.url).pathname;if(path==='/health'&&request.method==='GET')return Response.json({ok:true,service:'winterlight-realtime',revision:env.RELEASE_REVISION||'local'},{headers:{'Cache-Control':'no-store'}});if(path==='/metrics'&&request.method==='GET')return metrics(request,env);if(!['/connect','/rpc'].includes(path))return new Response('Not found',{status:404});return env.WORLD.get(env.WORLD.idFromName('winter-plaza')).fetch(request);}};
++// Server-to-server only. Browsers always send Origin on cross-origin fetches and no CORS header is returned.
++// METRICS_TOKEN is separate from REALTIME_SECRET so the read-only view can never sign admin RPC.
++async function metrics(request,env){
++ const reply=(body,status,extra={})=>Response.json(body,{status,headers:{'Cache-Control':'no-store',...extra}});
++ if(request.headers.has('origin'))return reply({error:'forbidden'},403);
++ if(!env.METRICS_TOKEN||env.METRICS_TOKEN.length<32||env.METRICS_TOKEN===env.REALTIME_SECRET)return reply({error:'metrics disabled'},503);
++ if(!await verifyBearer(request.headers.get('authorization'),env.METRICS_TOKEN))return reply({error:'unauthorized'},401,{'WWW-Authenticate':'Bearer'});
++ const inner=await env.WORLD.get(env.WORLD.idFromName('winter-plaza')).fetch('https://world.internal/metrics');
++ return reply({ok:true,service:'winterlight-realtime',revision:env.RELEASE_REVISION||'local',...await inner.json()},200);
++}
+ export class WinterWorld{
+  constructor(ctx,env){this.ctx=ctx;this.env=env;this.nonces=new Map();this.world=new RealtimeWorld({restore:ctx.getWebSockets()});ctx.blockConcurrencyWhile(async()=>{const saved=await ctx.storage.get('shared');if(saved){this.world.rpc(saved);this.world.revoked=new Map(saved.revoked||[]);this.sharedJSON=JSON.stringify(saved);}});}
+  async fetch(request){
+   const url=new URL(request.url);
++  // Reached only through the authenticated Worker route above. A 5 s cache bounds work under any poll rate.
++  if(url.pathname==='/metrics'){const now=Date.now();if(!this.metricsCache||now-this.metricsCache.at>=5000)this.metricsCache={at:now,body:this.world.publicMetrics()};return Response.json({at:this.metricsCache.at,...this.metricsCache.body});}
+   if(url.pathname==='/rpc'){
+    if(request.method!=='POST'||Number(request.headers.get('content-length')||0)>65536)return new Response('Invalid request',{status:400});
+    try{request=await boundedRequest(request,65536);}catch{return new Response('Request too large',{status:413});}
+diff --git a/realtime/world.js b/realtime/world.js
+index b6f59c6..570c883 100644
+--- a/realtime/world.js
++++ b/realtime/world.js
+@@ -4,7 +4,7 @@ import {activityGestures} from '../dist/activity-state.js';
+ export const realtimeLimits=Object.freeze({capacity:100,peers:32,maxMessage:2048,rate:15,idleMs:15000});
+ const modes=new Set(['','lift','summit','ski','rest','bath','sauna','lie','tea','dining','carousel','ferris','view','footbath']);
+ export class RealtimeWorld{
+- constructor({now=Date.now,restore=[]}={}){this.now=now;this.clients=new Map();this.known=new WeakMap();this.farSent=new WeakMap();this.recentlyClosed=new Map();this.revoked=new Map();this.fireworks=null;this.rideSeats=[];this.metrics={since:now(),accepted:0,closed:0,reconnected:0,received:0,rejected:0,bytesOut:0,rejections:{},clientRTT:[],samples:[]};for(const ws of restore){const state=ws.deserializeAttachment();if(state&&state.exp>now())this.clients.set(ws,state);else ws.close(4001,'Session expired');}}
++ constructor({now=Date.now,restore=[]}={}){this.now=now;this.clients=new Map();this.known=new WeakMap();this.farSent=new WeakMap();this.recentlyClosed=new Map();this.revoked=new Map();this.fireworks=null;this.rideSeats=[];this.metrics={since:now(),accepted:0,closed:0,reconnected:0,received:0,sent:0,rejected:0,bytesOut:0,rejections:{},clientRTT:[],samples:[]};for(const ws of restore){const state=ws.deserializeAttachment();if(state&&state.exp>now())this.clients.set(ws,state);else ws.close(4001,'Session expired');}}
+  save(ws,state){ws.serializeAttachment?.(state);}
+  accept(ws,claims){
+   this.prune();if(this.revoked.get(claims.id)>this.now()){ws.close(4001,'Session revoked');return false;}
+@@ -15,7 +15,7 @@ export class RealtimeWorld{
+   const state={id:claims.id,exp:claims.exp,profile:previous?.[1].profile||claims.profile,seq:-1,seen:this.now(),poseAt:this.now(),windowAt:this.now(),messages:0};
+   this.clients.set(ws,state);this.save(ws,state);this.metrics.accepted++;this.send(ws,{type:'ready',...this.wireSnapshot(ws,state)});return true;
+  }
+- send(ws,data){const body=JSON.stringify(data);try{ws.send(body);this.metrics.bytesOut+=body.length;}catch{this.close(ws);}}
++ send(ws,data){const body=JSON.stringify(data);try{ws.send(body);this.metrics.sent++;this.metrics.bytesOut+=body.length;}catch{this.close(ws);}}
+  close(ws){const s=this.clients.get(ws);if(this.clients.delete(ws)){this.metrics.closed++;this.recentlyClosed.set(s.id,this.now()+60000);while(this.recentlyClosed.size>100)this.recentlyClosed.delete(this.recentlyClosed.keys().next().value);}}
+  prune(){const now=this.now();for(const [ws,s] of this.clients)if(s.exp<=now||now-s.seen>realtimeLimits.idleMs){this.clients.delete(ws);ws.close(4001,'Session expired');this.metrics.closed++;}for(const [id,expires]of this.revoked)if(expires<=now)this.revoked.delete(id);}
+  message(ws,raw){
+@@ -58,6 +58,11 @@ export class RealtimeWorld{
+   const now=this.now(),people=[...this.clients.values()].filter(s=>s.id!==self.id&&s.profile.region===self.profile.region).sort((a,b)=>Math.hypot(a.profile.x-self.profile.x,a.profile.z-self.profile.z)-Math.hypot(b.profile.x-self.profile.x,b.profile.z-self.profile.z)).slice(0,realtimeLimits.peers).map(s=>({...s.profile,speed:now-s.poseAt>1500?0:s.profile.speed,chat:now-s.profile.chatAt<10000?s.profile.chat:'',gesture:now-s.profile.gestureAt<6000?s.profile.gesture:''}));
+   return{people,count:this.clients.size,rideSeats:this.rideSeats.filter(s=>s.expiresAt>now),fireworks:this.fireworks,serverTime:now};
+  }
++ // Read-only operations view: aggregate counters only. No ids, names, chat, poses or network identity.
++ publicMetrics(){
++  const m=this.rpc({action:'metrics'}),keep=(o,re)=>Object.fromEntries(Object.entries(o).filter(([k,v])=>re.test(k)&&Number.isFinite(v)));
++  return{since:m.since,connections:m.connections,capacity:m.capacity,accepted:m.accepted,closed:m.closed,reconnected:m.reconnected,received:m.received,sent:m.sent,rejected:m.rejected,rejections:keep(m.rejections,/^[a-z]{1,16}$/),bytesOut:m.bytesOut,handlerMeanMs:m.handlerMeanMs,handlerP95Ms:m.handlerP95Ms,clientRTTMeanMs:m.clientRTTMeanMs,clientRTTP95Ms:m.clientRTTP95Ms,rttSamples:this.metrics.clientRTT.length,regions:keep(m.regions,/^[a-z0-9_-]{1,32}$/)};
++ }
+  rpc(b){
+   this.prune();const now=this.now();
+   if(b.action==='authorize')for(const [ws,s]of this.clients)if(s.id===b.id){s.exp=b.exp;for(const k of ['name','color','colorTop','accessory','fluff','roundness'])s.profile[k]=b.profile[k];this.save(ws,s);}
+diff --git a/tests/helpers/realtime-service.mjs b/tests/helpers/realtime-service.mjs
+index b015623..b0a026d 100644
+--- a/tests/helpers/realtime-service.mjs
++++ b/tests/helpers/realtime-service.mjs
+@@ -1,9 +1,9 @@
+ import {Miniflare} from 'miniflare';import {build} from 'esbuild';import path from 'node:path';
+ import {apiFixture} from './service.mjs';
+-export async function realtimeFixture(t){
++export async function realtimeFixture(t,{bindings={}}={}){
+  const fixture=await apiFixture(),secret='local-test-only-'+crypto.randomUUID(),script=path.join(fixture.dir,'realtime.mjs');
+  await build({entryPoints:['realtime/worker.js'],bundle:true,format:'esm',platform:'browser',target:'es2022',outfile:script});
+- const mf=new Miniflare({rootPath:fixture.dir,modulesRoot:fixture.dir,modules:true,scriptPath:script,compatibilityDate:'2026-07-01',durableObjects:{WORLD:{className:'WinterWorld',useSQLite:true}},bindings:{REALTIME_SECRET:secret,ALLOWED_ORIGINS:'http://127.0.0.1'},port:0,inspectorPort:0});
++ const mf=new Miniflare({rootPath:fixture.dir,modulesRoot:fixture.dir,modules:true,scriptPath:script,compatibilityDate:'2026-07-01',durableObjects:{WORLD:{className:'WinterWorld',useSQLite:true}},bindings:{REALTIME_SECRET:secret,ALLOWED_ORIGINS:'http://127.0.0.1',...(typeof bindings==='function'?bindings(secret):bindings)},port:0,inspectorPort:0});
+  const close=async()=>{await mf.dispose();fixture.close();};if(t)t.after(close);
+  const url=await mf.ready;Object.assign(fixture.env,{REALTIME_URL:url.origin,REALTIME_SECRET:secret});
+  return{...fixture,mf,url,close};
+diff --git a/tests/metrics-endpoint.test.mjs b/tests/metrics-endpoint.test.mjs
+new file mode 100644
+index 0000000..73567ec
+--- /dev/null
++++ b/tests/metrics-endpoint.test.mjs
+@@ -0,0 +1,38 @@
++import test from 'node:test';import assert from 'node:assert/strict';import WebSocket from 'ws';
++import {realtimeFixture} from './helpers/realtime-service.mjs';
++import {RealtimeWorld} from '../realtime/world.js';
++import {verifyBearer} from '../realtime/auth.js';
++const pose={x:0,y:.95,z:30,yaw:0,speed:0,mode:''},token='metrics-test-only-'+'m'.repeat(32);
++function connect(url,ticket){return new Promise((resolve,reject)=>{const ws=new WebSocket(url,['winter-v1','auth.'+ticket],{origin:'http://127.0.0.1'});ws.once('error',reject);ws.once('close',()=>reject(Error('closed before welcome')));ws.once('message',raw=>resolve({ws,ready:JSON.parse(raw)}));});}
++test('public metrics are aggregates only and count sent messages',()=>{
++ let now=10000;const world=new RealtimeWorld({now:()=>now}),socket=()=>({send(){},close(){},serializeAttachment(){}}),a=socket(),b=socket();
++ world.accept(a,{id:'a'.repeat(64),exp:100000,profile:{...pose,id:'a'.repeat(64),name:'비밀닉네임',chat:'비밀채팅',region:'outdoors'}});
++ world.accept(b,{id:'b'.repeat(64),exp:100000,profile:{...pose,id:'b'.repeat(64),name:'다른닉네임',region:'museum'}});
++ world.message(a,JSON.stringify({type:'ping',seq:1,at:now,rttMs:42}));world.message(a,'not json');
++ const m=world.publicMetrics(),json=JSON.stringify(m);
++ assert.equal(m.connections,2);assert.equal(m.accepted,2);assert.equal(m.received,2);assert.equal(m.rejected,1);assert.deepEqual(m.rejections,{format:1});
++ assert.equal(m.sent,4,'2 ready + 1 snapshot + 1 rejected');assert.equal(m.clientRTTMeanMs,42);assert.equal(m.rttSamples,1);assert.deepEqual(m.regions,{outdoors:1,museum:1});
++ for(const secret of ['비밀닉네임','다른닉네임','비밀채팅','a'.repeat(64),'b'.repeat(64)])assert.ok(!json.includes(secret),'leaked '+secret);
++ assert.deepEqual(Object.keys(m).sort(),['accepted','bytesOut','capacity','clientRTTMeanMs','clientRTTP95Ms','closed','connections','handlerMeanMs','handlerP95Ms','received','reconnected','regions','rejected','rejections','rttSamples','sent','since']);
++});
++test('metrics bearer rejects short, malformed and wrong tokens',async()=>{
++ assert.equal(await verifyBearer('Bearer '+token,token),true);assert.equal(await verifyBearer('Bearer '+token+'x',token),false);
++ assert.equal(await verifyBearer(token,token),false);assert.equal(await verifyBearer('Bearer short','short'),false);assert.equal(await verifyBearer(null,token),false);
++});
++test('real Cloudflare runtime: /metrics is disabled without its own token',async t=>{
++ const f=await realtimeFixture(t),r=await f.mf.dispatchFetch(new URL('/metrics',f.url));assert.equal(r.status,503);
++ const same=await realtimeFixture(t,{bindings:secret=>({METRICS_TOKEN:secret})});
++ const reuse=await same.mf.dispatchFetch(new URL('/metrics',same.url),{headers:{Authorization:'Bearer '+same.env.REALTIME_SECRET}});assert.equal(reuse.status,503,'admin RPC secret must not double as metrics token');
++});
++test('real Cloudflare runtime: /metrics is server-to-server, authenticated and live',async t=>{
++ const f=await realtimeFixture(t,{bindings:{METRICS_TOKEN:token}}),url=new URL('/metrics',f.url),get=headers=>f.mf.dispatchFetch(url,{headers});
++ assert.equal((await get({})).status,401);assert.equal((await get({Authorization:'Bearer wrong-'+token})).status,401);
++ assert.equal((await get({Authorization:'Bearer '+f.env.REALTIME_SECRET})).status,401,'RPC secret is not a metrics token');
++ const browser=await get({Authorization:'Bearer '+token,Origin:'https://moru-winter-park.vercel.app'});assert.equal(browser.status,403);assert.equal(browser.headers.get('access-control-allow-origin'),null);
++ assert.equal((await f.mf.dispatchFetch(url,{method:'POST',headers:{Authorization:'Bearer '+token}})).status,404);
++ const a=f.guest();await f.call(a,'join',{});const ticket=await f.call(a,'realtime',{});const c=await connect(ticket.data.url,ticket.data.ticket);t.after(()=>c.ws.close());
++ const r=await get({Authorization:'Bearer '+token});assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');assert.equal(r.headers.get('access-control-allow-origin'),null);
++ const m=await r.json();assert.equal(m.ok,true);assert.equal(m.service,'winterlight-realtime');assert.equal(m.connections,1);assert.equal(m.capacity,100);assert.ok(m.sent>=1);assert.ok(Number.isFinite(m.at));
++ const again=await (await get({Authorization:'Bearer '+token})).json();assert.equal(again.at,m.at,'5 s cache bounds Durable Object work');
++ assert.ok(!JSON.stringify(m).includes(ticket.data.ticket.split('.')[0]));
++});
