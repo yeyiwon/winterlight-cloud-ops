@@ -25,7 +25,7 @@ describe('mock 어댑터', () => {
   });
   it('접속자는 수용 인원을 넘지 않는다', async () => {
     const s = await mockAdapter.snapshot(T);
-    for (const p of s.series.points) { expect(p.visitors).toBeLessThanOrEqual(100); expect(p.sockets).toBeLessThanOrEqual(p.visitors); }
+    for (const p of s.series.points) { expect(p.visitors).toBeLessThanOrEqual(100); expect(p.sockets).toBeLessThanOrEqual(p.visitors as number); }
   });
 });
 

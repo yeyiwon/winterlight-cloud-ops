@@ -8,6 +8,8 @@ vi.mock('server-only', () => ({}));
 const { createLiveAdapter } = await import('../src/lib/adapters/live');
 
 const SHA = 'c2fbc3f0123456789abcdef0123456789abcdef0';
+const TOKEN = 'metrics-token-for-tests-only-0123456789';
+const RT_METRICS = { ok: true, service: 'winterlight-realtime', revision: SHA, at: 1000, since: 1, connections: 3, capacity: 100, accepted: 5, closed: 2, reconnected: 1, received: 40, sent: 90, rejected: 0, bytesOut: 9000, handlerMeanMs: 0.2, handlerP95Ms: 0.5, clientRTTMeanMs: 31.4, clientRTTP95Ms: 60, rttSamples: 4, regions: { outdoors: 2, museum: 1, 'Bad Key!': 9 }, rejections: {}, name: '닉네임', chat: '채팅' };
 const json = (res: http.ServerResponse, status: number, body: unknown, type = 'application/json') => { res.writeHead(status, { 'content-type': type }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
 
 /** 원본 WINTERLIGHT의 응답 형태를 흉내 내는 로컬 서버. 실제 서비스가 아니다. */
@@ -25,6 +27,8 @@ beforeAll(async () => {
     if (p === '/lock/api/health') return json(res, 403, { error: 'forbidden' });
     if (p === '/other/health') return json(res, 200, { ok: true, service: 'something-else', revision: 'x' });
     if (p === '/norev/release.json') return json(res, 200, { apiOrigin: 'x' });
+    if (p === '/ok/metrics') return req.headers.authorization === `Bearer ${TOKEN}` ? json(res, 200, RT_METRICS) : json(res, 401, { error: 'unauthorized' });
+    if (p === '/off/metrics') return json(res, 503, { error: 'metrics disabled' });
     if (p === '/slow/api/health') return void setTimeout(() => json(res, 200, { ok: true }), 600);
     json(res, 404, { error: 'nope' });
   });
@@ -144,9 +148,11 @@ describe('Live 어댑터 통합', () => {
     const s: Snapshot = await createLiveAdapter({ WINTERLIGHT_WEB_URL: `${base}/ok`, WINTERLIGHT_REALTIME_URL: `${base}/ok` }).snapshot();
     expect(s.overview.status).toMatchObject({ src: 'live', value: 'ok' });
     expect(s.overview.revision.value).toBe('c2fbc3f');
-    expect(s.probes.items.map((p) => p.state)).toEqual(['ok', 'ok', 'ok']);
+    expect(s.probes.items.map((p) => p.state)).toEqual(['ok', 'ok', 'ok', 'skipped']);
+    expect(s.probes.items[3]).toMatchObject({ id: 'realtime-metrics', kind: 'not-configured' });
     expect(s.infra.d1).toMatchObject({ src: 'live', value: 'ok' });
-    for (const k of ['visitors', 'sockets', 'rpm', 'avg', 'p95', 'err'] as const) expect(s.overview[k].value).toBeNull();
+    for (const k of ['visitors', 'sockets', 'rpm', 'p95', 'err'] as const) expect(s.overview[k].value).toBeNull();
+    expect(s.overview.avg).toMatchObject({ src: 'live', from: 'WINTERLIGHT /api/health' });
     expect(metrics(s).some((m) => m.src === 'demo')).toBe(false);
   });
   it('백엔드 D1 실패(503)는 D1 장애로, 연결 실패는 측정 불가로 표시된다', async () => {

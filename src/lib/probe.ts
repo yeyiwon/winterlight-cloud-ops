@@ -1,4 +1,4 @@
-import type { Health, M, Probe, ProbeErrorKind } from './types';
+import type { Health, M, Probe, ProbeCategory, ProbeErrorKind } from './types';
 import { NA, UNAVAIL } from './types';
 
 /**
@@ -6,14 +6,17 @@ import { NA, UNAVAIL } from './types';
  *   GET {web}/api/health   → { ok, multiplayer, revision, transport }  (D1 SELECT 1 실패 시 503 { ok:false })
  *   GET {web}/release.json → { revision, apiOrigin }
  *   GET {rt}/health        → { ok, service:'winterlight-realtime', revision }
+ *   GET {rt}/metrics       → 집계 지표(서버 간 Bearer 인증, 원본 cloud-ops/metrics-endpoint 브랜치)
  * 네트워크 오류와 서비스 장애를 구분한다. 응답이 없다는 사실만으로 서비스가 내려갔다고 단정하지 않는다.
  */
 type Fetch = typeof fetch;
 
-export interface ProbeSpec { id: Probe['id']; label: string; path: string; base: string | undefined; env: string; service?: string; needsRevision?: boolean }
+/** bearer: 서버 간 인증 토큰(값). bearerEnv가 있으면 토큰 없이는 실행하지 않는다. 토큰은 결과에 절대 담지 않는다. */
+export interface ProbeSpec { id: Probe['id']; label: string; path: string; base: string | undefined; env: string; service?: string; needsRevision?: boolean; bearer?: string; bearerEnv?: string }
 export const MAX_BODY = 64 * 1024;
 
 const COPY: Record<ProbeErrorKind, [string, string]> = {
+  auth: ['인증에 실패했습니다.', '대시보드의 {env} 값과 원본 Worker의 METRICS_TOKEN이 같은지 확인하세요. 관리자 RPC 비밀(REALTIME_SECRET)은 사용하지 않습니다.'],
   'not-configured': ['점검할 주소가 설정되지 않았습니다.', '서버 환경변수 {env}에 주소를 넣어 주세요.'],
   'invalid-url': ['주소 형식이 올바르지 않습니다.', '{env}를 https://로 시작하는 전체 주소로 고쳐 주세요. (http는 localhost만 허용)'],
   timeout: ['제한 시간 안에 응답이 없습니다.', '서비스가 느리거나 대시보드 서버의 네트워크가 막혀 있을 수 있어 장애로 단정하지 않습니다. 잠시 후에도 같으면 주소와 방화벽을 확인하세요.'],
@@ -73,20 +76,27 @@ export function pickFields(id: Probe['id'], body: Record<string, unknown>): Prob
   if (id === 'release' && typeof body.apiOrigin === 'string') {
     try { const u = new URL(body.apiOrigin); if (u.protocol === 'https:') out.push({ key: 'apiOrigin', label: '백엔드 도메인', value: u.hostname }); } catch { /* 무시 */ }
   }
-  if (id === 'realtime' && typeof body.service === 'string' && clean(body.service)) out.push({ key: 'service', label: '서비스 이름', value: body.service });
+  if ((id === 'realtime' || id === 'realtime-metrics') && typeof body.service === 'string' && clean(body.service)) out.push({ key: 'service', label: '서비스 이름', value: body.service });
+  if (id === 'realtime-metrics' && Number.isSafeInteger(body.connections) && Number.isSafeInteger(body.capacity)) out.push({ key: 'connections', label: '연결', value: `${body.connections} / ${body.capacity}` });
   return out;
 }
 
-export async function runProbe(spec: ProbeSpec, f: Fetch, timeoutMs = 4000): Promise<Probe> {
-  const t = safeTarget(spec.base, spec.path);
-  if ('error' in t) return result(spec, null, { state: 'skipped', kind: t.error });
+export const runProbe = async (spec: ProbeSpec, f: Fetch, timeoutMs = 4000): Promise<Probe> => (await probeWithBody(spec, f, timeoutMs)).probe;
+
+/** 점검 결과와 함께, 정상일 때만 원본 응답 본문을 돌려준다(본문은 서버 안에서만 쓰고 화면으로 보내지 않는다). */
+export async function probeWithBody(spec: ProbeSpec, f: Fetch, timeoutMs = 4000): Promise<{ probe: Probe; body: Record<string, unknown> | null }> {
+  const t = safeTarget(spec.base, spec.path), none = (probe: Probe) => ({ probe, body: null });
+  if ('error' in t) return none(result(spec, null, { state: 'skipped', kind: t.error }));
+  if (spec.bearerEnv && !spec.bearer) return none(result({ ...spec, env: spec.bearerEnv }, t.url, { state: 'skipped', kind: 'not-configured', message: '서버 간 인증 토큰이 설정되지 않았습니다.', at: null }));
   const target = t.url, began = performance.now(), took = () => Math.round(performance.now() - began);
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (spec.bearer) headers.Authorization = `Bearer ${spec.bearer}`;
   let r: Response;
   try {
-    r = await f(target, { cache: 'no-store', headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+    r = await f(target, { cache: 'no-store', headers, signal: AbortSignal.timeout(timeoutMs) });
   } catch (e) {
     const c = classifyThrown(e);
-    return result(spec, target, { state: 'fail', kind: c.kind, detail: c.detail, ms: null });
+    return none(result(spec, target, { state: 'fail', kind: c.kind, detail: c.detail, ms: null }));
   }
   const ms = took(), status = r.status;
   let body: Record<string, unknown> | null = null, textOk = false;
@@ -94,10 +104,13 @@ export async function runProbe(spec: ProbeSpec, f: Fetch, timeoutMs = 4000): Pro
   if (type.includes('json') && Number(r.headers.get('content-length') ?? 0) <= MAX_BODY) {
     try { const text = await r.text(); if (text.length <= MAX_BODY) { const j = JSON.parse(text); if (j && typeof j === 'object' && !Array.isArray(j)) { body = j as Record<string, unknown>; textOk = true; } } } catch { /* 형식 오류로 처리 */ }
   } else { try { await r.body?.cancel(); } catch { /* 무시 */ } }
-  const fail = (kind: ProbeErrorKind, extra?: Partial<Probe>) => result(spec, target, { state: 'fail', kind, status, ms, detail: `HTTP ${status}`, ...extra });
+  const fail = (kind: ProbeErrorKind, extra?: Partial<Probe>) => none(result({ ...spec, env: kind === 'auth' && spec.bearerEnv ? spec.bearerEnv : spec.env }, target, { state: 'fail', kind, status, ms, detail: `HTTP ${status}`, ...extra }));
 
+  if (status === 401 && spec.bearer) return fail('auth');
   if (status === 401 || status === 403) return fail('blocked');
+  if (status === 404 && spec.id === 'realtime-metrics') return fail('not-found', { message: '원본 실시간 Worker에 /metrics가 아직 배포되지 않았습니다.', hint: '원본 저장소의 cloud-ops/metrics-endpoint 브랜치를 검토·테스트한 뒤 배포하면 수집이 시작됩니다.' });
   if (status === 404) return fail('not-found');
+  if (status === 503 && spec.id === 'realtime-metrics' && body?.error === 'metrics disabled') return fail('not-configured', { message: '원본 Worker에 METRICS_TOKEN이 설정되지 않아 /metrics가 꺼져 있습니다.', hint: 'wrangler secret put METRICS_TOKEN --env production 으로 대시보드와 같은 값을 넣어 주세요(REALTIME_SECRET과 달라야 합니다).' });
   if (status === 429) return fail('rate-limited');
   if (body && body.ok === false) return fail('service-unhealthy');
   if (status === 502 && spec.id === 'web-health') return fail('server', { message: '프론트엔드(Vercel)는 응답했지만 뒤쪽 서버에 연결하지 못했습니다.', hint: '백엔드 Worker 주소와 상태를 확인하세요. 원본 프록시가 HTTP 502를 돌려주는 경우입니다.' });
@@ -107,8 +120,19 @@ export async function runProbe(spec: ProbeSpec, f: Fetch, timeoutMs = 4000): Pro
   if (spec.service && body.service !== spec.service) return fail('format', { message: '다른 서비스의 응답입니다.', detail: `service=${clean(body.service) ?? '없음'}` });
   const revision = clean(body.revision);
   if (spec.needsRevision && !revision) return fail('format', { message: 'revision 값이 없습니다.' });
-  return result(spec, target, { state: 'ok', status, ms, revision, fields: pickFields(spec.id, body) });
+  return { probe: result(spec, target, { state: 'ok', status, ms, revision, fields: pickFields(spec.id, body) }), body };
 }
+
+const NET: ProbeErrorKind[] = ['dns', 'timeout', 'refused', 'tls', 'network'];
+/** 실패 원인 분류. 대시보드 쪽 네트워크 문제는 서비스 장애로 세지 않는다. */
+export function categoryOf(p: Pick<Probe, 'state' | 'kind'>): ProbeCategory | null {
+  if (p.state !== 'fail') return null;
+  if (p.kind === 'server' || p.kind === 'service-unhealthy') return 'outage';
+  if (p.kind === 'auth' || p.kind === 'blocked') return 'auth';
+  if (p.kind && NET.includes(p.kind)) return 'network';
+  return 'unmeasured';
+}
+export const CATEGORY_LABEL: Record<ProbeCategory, string> = { outage: '실제 서버 장애', auth: '인증 문제', network: 'DNS·네트워크·프록시 제한', unmeasured: '측정 불가' };
 
 /** 점검 결과 → 화면용 상태. 네트워크 계열 실패는 '장애'가 아니라 '측정 불가'로 둔다. */
 export function healthOf(p: Probe): M<Health> {

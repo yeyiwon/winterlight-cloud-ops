@@ -8,6 +8,8 @@ import { Spark } from './spark';
 export const cn = (...v: ClassValue[]) => twMerge(clsx(v));
 const SRC: Record<Src, [string, string]> = { demo: ['DEMO', 'chip-demo'], live: ['LIVE', 'chip-live'], 'needs-integration': ['연동 필요', 'chip-na'], unavailable: ['측정 불가', 'chip-un'] };
 export const SrcBadge = ({ src, note }: { src: Src; note?: string }) => <span title={note} className={cn('chip', SRC[src][1])}>{SRC[src][0]}</span>;
+/** Live 값의 출처와 측정 시각. 모든 실측 수치 아래에 붙는다. */
+export const Provenance = ({ m, className }: { m: M<unknown>; className?: string }) => (m.src === 'live' && (m.from || m.at) ? <p data-provenance className={cn('text-[11px] leading-snug ink2', className)}>{m.from && <>출처 {m.from}</>}{m.from && m.at ? ' · ' : ''}{m.at ? <>측정 {time(m.at)}</> : null}</p> : null);
 
 /** lift 카드는 포인터 위치를 CSS 변수로 넘겨 유리 표면의 빛 반사가 따라오게 한다(React 리렌더 없음). */
 export function Card({ className, children, lift = true }: { className?: string; children: ReactNode; lift?: boolean }) {
@@ -49,7 +51,7 @@ export function Val({ m, digits = 0, unit, className = 'text-4xl' }: { m: M; dig
 }
 /** spark: 같은 지표의 최근 시계열. 시계열 출처가 없으면 넘기지 않는다. */
 export function Stat({ label, m, digits, unit, hint, spark, tint }: { label: string; m: M; digits?: number; unit?: string; hint?: string; spark?: number[]; tint?: string }) {
-  return <Card className="flex min-h-[8.5rem] flex-col justify-between"><CardHead title={label} src={m.value == null ? undefined : m.src} /><div><Val m={m} digits={digits} unit={unit} />{hint && m.value != null && <p className="mt-2 text-xs ink2">{hint}</p>}{m.value != null && spark && spark.length > 1 && <Spark values={spark} color={tint} />}</div></Card>;
+  return <Card className="flex min-h-[8.5rem] flex-col justify-between"><CardHead title={label} src={m.value == null ? undefined : m.src} note={m.note} /><div><Val m={m} digits={digits} unit={unit} />{(hint ?? (m.src === 'live' ? m.note : undefined)) && m.value != null && <p className="mt-2 text-xs ink2">{hint ?? m.note}</p>}{m.value != null && spark && spark.length > 1 && <Spark values={spark} color={tint} />}<Provenance m={m} className="mt-2" /></div></Card>;
 }
 const H: Record<Health, [string, string]> = { ok: ['정상', 'ok'], warn: ['주의', 'warn'], down: ['장애', 'down'] };
 /** 상태는 점의 숨쉬기 속도로도 구분되고, 바뀌는 순간 파문이 한 번 퍼진다. */
@@ -65,6 +67,7 @@ export function Status({ m }: { m: M<Health> }) {
         {H[m.value][0]}<SrcBadge src={m.src} note={m.note} />
       </span>
       {m.note && <span className="max-w-[24rem] text-xs ink2">{m.note}</span>}
+      <Provenance m={m} />
     </span>
   );
 }

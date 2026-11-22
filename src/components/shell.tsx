@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState, type ReactNode } from 'react';
-import { SnapshotProvider, useSnap } from './provider';
+import { SnapshotProvider, staleOf, useSnap } from './provider';
 import { SnowField } from './snow';
 import { cn, time } from './ui';
 
@@ -15,17 +15,20 @@ function Theme() {
   const flip = () => { const n = t === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = n; try { localStorage.setItem('wl-theme', n); } catch {} setT(n); };
   return <button onClick={flip} aria-label={t === 'dark' ? '라이트 모드로 전환' : '다크 모드로 전환'} className="chip cursor-pointer px-3 py-1.5 text-sm transition-transform hover:scale-105">{t === 'dark' ? '☾ 다크' : '☀ 라이트'}</button>;
 }
-/** 데이터 출처 배너. 하트비트가 갱신마다 한 번 퍼지고, 10초 넘게 새 값이 없으면 지연으로 알린다. */
+/** 데이터 출처 배너. 하트비트가 갱신마다 한 번 퍼진다. LIVE는 수집 주기·마지막 수집·다음 수집을, 오래된 값이면 지연을 알린다. */
 function Banner() {
   const { snap, error, receivedAt } = useSnap();
   const [now, setNow] = useState(0);
   useEffect(() => { setNow(Date.now()); const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   if (!snap) return null;
-  const demo = snap.mode === 'mock', age = receivedAt && now ? Math.max(0, Math.round((now - receivedAt) / 1000)) : 0, stale = error || age > 10;
+  const demo = snap.mode === 'mock', m = snap.monitor, age = receivedAt && now ? Math.max(0, Math.round((now - receivedAt) / 1000)) : 0;
+  const collectedAge = m.collectedAt && now ? Math.max(0, Math.round((now - m.collectedAt) / 1000)) : 0, nextIn = m.nextAt && now ? Math.max(0, Math.round((m.nextAt - now) / 1000)) : 0;
+  const stale = demo ? error || age > 10 : error || (now > 0 && staleOf(snap, now));
   return <div role="note" className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-xs md:px-8', demo ? 'chip-demo' : 'chip-live')} style={{ borderBottom: '1px solid var(--line)', borderRadius: 0 }}>
-    <b>{demo ? 'DEMO 모드' : 'LIVE · 읽기 전용'}</b><span>{demo ? '화면의 모든 수치는 시뮬레이션이며 실제 WINTERLIGHT 운영 데이터가 아닙니다.' : '값을 얻지 못한 지표는 숫자 대신 사유를 표시합니다.'}</span>
+    <b>{demo ? 'DEMO 모드' : 'LIVE · 읽기 전용'}</b><span>{demo ? '화면의 모든 수치는 시뮬레이션이며 실제 WINTERLIGHT 운영 데이터가 아닙니다.' : `실제 운영 서버에서 ${m.intervalMs / 1000}초마다 수집합니다. 값을 얻지 못한 지표는 숫자 대신 사유를 표시합니다.`}</span>
+    {!demo && m.alerts.length > 0 && <span className="chip chip-demo" data-alerts={m.alerts.length}>경고 {m.alerts.length}</span>}
     <span className="ml-auto inline-flex items-center gap-2 tabular-nums" style={stale ? { color: 'var(--warn)' } : undefined} data-stale={stale ? '' : undefined}>
-      <i key={receivedAt ?? 0} className="beat" />{stale ? `갱신 지연 · ${age}초 전 수신` : `${time(snap.at)} 갱신`}
+      <i key={(demo ? receivedAt : m.collectedAt) ?? 0} className="beat" />{demo ? (stale ? `갱신 지연 · ${age}초 전 수신` : `${time(snap.at)} 갱신`) : stale ? `오래된 데이터 · ${collectedAge}초 전 수집` : `${time(snap.at)} 수집 · 다음 ${nextIn}초 후`}
     </span></div>;
 }
 export function Shell({ children }: { children: ReactNode }) {
