@@ -48,6 +48,12 @@ describe('모니터: 연속 오류·회복·기록', () => {
     expect(m.timeline.map((e) => e.kind)).toEqual(['outage', 'recovery']);
     expect(m.failures).toHaveLength(2);
   });
+  it('설정 필요로 바뀐 점검의 열린 장애는 닫는다(성공 보고가 오지 않으므로)', () => {
+    const m = new Monitor(30_000, 2, 0), nf = (t: number) => probe('fail', t, { kind: 'not-found', status: 404 });
+    m.observe([nf(1)], null, 1); m.observe([nf(2)], null, 2); expect(m.incidents[0].status).toBe('open');
+    m.observe([probe('skipped', 3, { kind: 'not-found' })], null, 3);
+    expect(m.incidents[0]).toMatchObject({ status: 'resolved', resolvedAt: 3 }); expect(m.alerts()).toHaveLength(0);
+  });
   it('네트워크 계열 실패는 장애가 아니라 수집 실패(경고)로 분류한다', () => {
     const m = new Monitor(30_000, 2, 0), dns = (t: number) => probe('fail', t, { kind: 'dns', status: null });
     m.observe([dns(1)], null, 1); m.observe([dns(2)], null, 2);
@@ -121,5 +127,36 @@ describe('Live 어댑터 + /metrics', () => {
     expect(p).toMatchObject({ state: 'fail', kind: 'not-found' });
     const q = await runProbe({ id: 'realtime-metrics', label: '지표', path: '/metrics', base: url, env: 'X', bearer: TOKEN, bearerEnv: 'T' }, fetch);
     expect(JSON.stringify(q)).not.toContain(TOKEN);
+  });
+});
+
+describe('운영 환경에서 확인한 오경보 방지', () => {
+  const res = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  // 2026-11-22 운영 실측: 웹·릴리스 c2fbc3f, 실시간 Worker 6c9fa62(코드 변경이 없어 재배포 안 됨), /metrics 404(미배포).
+  const prod = async (u: unknown) => { const p = new URL(String(u)).pathname;
+    if (p === '/api/health') return res(200, { ok: true, multiplayer: true, revision: 'c2fbc3f', transport: 'websocket-configured' });
+    if (p === '/release.json') return res(200, { revision: 'c2fbc3f', apiOrigin: 'https://api.example' });
+    if (p === '/health') return res(200, { ok: true, service: 'winterlight-realtime', revision: '6c9fa62ee9e70539f7b9ee0e2fee164cded86b58' });
+    return res(404, { error: 'Not found' }); };
+  const env = { WINTERLIGHT_WEB_URL: 'https://web.example', WINTERLIGHT_REALTIME_URL: 'https://rt.example', WINTERLIGHT_METRICS_TOKEN: TOKEN };
+  it('실시간 Worker 버전이 뒤처진 것만으로는 경고하지 않고, 설명만 붙인다', async () => {
+    const s = await createLiveAdapter(env, prod as never, { monitor: new Monitor() }).snapshot(1);
+    expect(s.overview.status.value).toBe('ok');
+    expect(s.overview.revision.value).toBe('c2fbc3f');
+    expect(s.overview.revision.note).toContain('6c9fa62');
+    expect(s.monitor.alerts).toHaveLength(0);
+  });
+  it('/metrics 404는 장애를 열지 않고 설정 필요로 남는다', async () => {
+    const mon = new Monitor(30_000, 2, 0), a = createLiveAdapter(env, prod as never, { monitor: mon });
+    let s; for (const t of [1, 2, 3]) s = await a.snapshot(t);
+    expect(s!.probes.items[3]).toMatchObject({ state: 'skipped', kind: 'not-found' });
+    expect(s!.incidents.items).toHaveLength(0); expect(s!.monitor.alerts).toHaveLength(0);
+    expect(s!.overview.visitors).toMatchObject({ src: 'needs-integration', note: expect.stringContaining('배포되지 않았습니다') });
+  });
+  it('프런트엔드와 API의 버전이 다르면 경고한다', async () => {
+    const split = async (u: unknown) => (new URL(String(u)).pathname === '/release.json' ? res(200, { revision: 'aaaaaaa' }) : prod(u));
+    const s = await createLiveAdapter(env, split as never, { monitor: new Monitor() }).snapshot(1);
+    expect(s.overview.status.value).toBe('warn');
+    expect(s.monitor.alerts.map((x) => x.id)).toContain('revision');
   });
 });

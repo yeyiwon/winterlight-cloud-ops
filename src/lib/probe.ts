@@ -143,11 +143,11 @@ export function healthOf(p: Probe): M<Health> {
   return UNAVAIL<Health>(why);
 }
 
-export function overallStatus(probes: Probe[]): M<Health> {
+export function overallStatus(probes: Probe[], mismatchOverride?: boolean): M<Health> {
   const used = probes.filter((p) => p.state !== 'skipped' && (p.id === 'web-health' || p.id === 'realtime'));
   if (!used.length) return NA<Health>('상태를 확인할 주소(WINTERLIGHT_WEB_URL)를 설정해 주세요.');
   const ok = used.filter((p) => p.state === 'ok').length, down = used.filter((p) => healthOf(p).value === 'down').length, unknown = used.length - ok - down;
-  const mismatch = revisionOf(probes).mismatch;
+  const mismatch = mismatchOverride ?? revisionOf(probes).mismatch;
   if (ok === used.length && !mismatch) return { src: 'live', value: 'ok' };
   if (ok === used.length && mismatch) return { src: 'live', value: 'warn', note: '서비스 간 배포 버전이 서로 다릅니다.' };
   if (ok === 0 && down === 0) return UNAVAIL<Health>(`점검 불가: ${used[0].message ?? ''} 상세는 인프라 화면의 연결 점검을 확인하세요.`.trim());

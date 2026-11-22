@@ -1,91 +1,118 @@
 'use client';
+import Link from 'next/link';
+import { Fragment, useState } from 'react';
 import { CATEGORY_LABEL, categoryOf } from '@/lib/probe';
-import type { Probe, Snapshot } from '@/lib/types';
+import type { Health, Probe, Snapshot } from '@/lib/types';
 import { useSnap } from './provider';
-import { Card, CardHead, cn, dt, time } from './ui';
+import { Mark, SrcBadge, cn, dt, time } from './ui';
 
-const tone = (p: Probe) => (p.state === 'ok' ? 'ok' : p.state === 'skipped' ? '' : categoryOf(p) === 'outage' ? 'down' : 'warn');
+const healthOf = (p: Probe): Health | 'unknown' => (p.state === 'ok' ? 'ok' : p.state === 'skipped' ? 'unknown' : categoryOf(p) === 'outage' ? 'down' : 'warn');
 const label = (p: Probe) => (p.state === 'ok' ? '정상' : p.state === 'skipped' ? (p.kind ? '설정 필요' : '실행 안 함') : CATEGORY_LABEL[categoryOf(p) ?? 'unmeasured']);
+const rev = (r: string | null) => (r ? (r.length === 40 ? r.slice(0, 7) : r) : '—');
 
-export function ProbeRow({ p, lastOk: seen }: { p: Probe; lastOk?: number }) {
-  const lastOk = p.lastOkAt ?? seen;
+/** 점검 하나의 상세. 원인 → 확인할 것 → 기술 정보 순서로, 바로 행동할 수 있게 쓴다. */
+function ProbeDetail({ p, lastOk }: { p: Probe; lastOk?: number }) {
   return (
-    <li className="probe-row rounded-2xl p-3.5" data-state={p.state} data-kind={p.kind ?? ''} style={{ border: '1px solid var(--line)', background: 'color-mix(in srgb, var(--glass) 70%, transparent)' }}>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <i className={cn('dot', tone(p))} />
-        <b className="text-sm">{p.label}</b>
-        <span className={cn('chip', p.state === 'ok' ? 'chip-live' : p.state === 'fail' ? 'chip-demo' : 'chip-na')}>{label(p)}</span>
-        {p.state === 'ok' && <span className="text-xs tabular-nums ink2">{p.ms}ms · HTTP {p.status}{p.revision ? ` · 버전 ${p.revision.length === 40 ? p.revision.slice(0, 7) : p.revision}` : ''}</span>}
-        {p.target && <code className="ml-auto max-w-full truncate text-[11px] ink2">{p.target}</code>}
+    <div className="grid gap-3 px-4 pb-4 pt-1 text-sm md:grid-cols-[1fr_1fr]">
+      <div className="space-y-1.5">
+        {p.state !== 'ok' && p.message && <p><b>원인</b> {p.message}</p>}
+        {p.state !== 'ok' && p.hint && <p className="ink2"><b className="text-[color:var(--ink)]">확인할 것</b> {p.hint}</p>}
+        {p.state === 'ok' && p.fields.length > 0 && <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">{p.fields.map((f) => <Fragment key={f.key}><dt className="ink2">{f.label}</dt><dd className="font-medium">{f.value}</dd></Fragment>)}</dl>}
       </div>
-      {p.state === 'ok' && p.fields.length > 0 && <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-1 pl-5 text-xs">{p.fields.map((f) => <div key={f.key} className="flex gap-1.5"><dt className="ink2">{f.label}</dt><dd className="font-medium">{f.value}</dd></div>)}</dl>}
-      {p.at != null && <p className="mt-1.5 pl-5 text-[11px] ink2">점검 시각 {time(p.at)}{p.state === 'ok' ? (lastOk ? ` · 마지막 성공 ${time(lastOk)}` : '') : `${lastOk ? ` · 마지막 성공 ${dt(lastOk)}` : ' · 모니터 시작 후 성공 기록 없음'}${p.fails ? ` · 연속 실패 ${p.fails}회` : ''}`}</p>}
-      {p.state !== 'ok' && p.message && (
-        <div className="mt-2 space-y-1 pl-5 text-sm">
-          <p>{p.message}</p>
-          {p.hint && <p className="text-xs ink2">확인할 것: {p.hint}</p>}
-          {p.detail && <p className="text-[11px] ink2">기술 정보: {p.detail}{p.ms != null ? ` · ${p.ms}ms` : ''}</p>}
-        </div>
-      )}
-    </li>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+        <dt className="ink3">주소</dt><dd className="code break-all">{p.target ?? '설정되지 않음'}</dd>
+        <dt className="ink3">점검 시각</dt><dd className="tabular-nums">{p.at ? time(p.at) : '실행 안 함'}</dd>
+        <dt className="ink3">마지막 성공</dt><dd className="tabular-nums">{lastOk ? dt(lastOk) : '모니터 시작 후 없음'}</dd>
+        <dt className="ink3">연속 실패</dt><dd className="tabular-nums">{p.fails ?? 0}회</dd>
+        {p.detail && <><dt className="ink3">기술 정보</dt><dd className="code break-all">{p.detail}</dd></>}
+      </dl>
+    </div>
   );
 }
 
-/** 공개 상태 엔드포인트 점검 목록. DEMO에서는 실행하지 않았음을 그대로 보여준다. */
-export function ProbeCard({ s }: { s: Snapshot }) {
+/** 원본 연결 점검 표. 행을 누르면 상세가 펼쳐진다. 실패 행은 처음부터 펼친다. */
+export function ProbeTable({ s }: { s: Snapshot }) {
   const { lastOk } = useSnap();
+  const [open, setOpen] = useState<Record<string, boolean>>({});
   const ran = s.probes.items.filter((p) => p.state !== 'skipped'), ok = ran.filter((p) => p.state === 'ok').length;
   return (
-    <Card lift={false}>
-      <CardHead title="원본 연결 점검 (공개 읽기 전용 상태 경로)" src={s.mode === 'mock' ? 'demo' : 'live'} />
-      {s.mode === 'live' && <p data-testid="probe-summary" className="mb-3 text-sm">수집 {ran.length ? `${ok}/${ran.length}건 성공` : '시도 없음 — 점검 주소가 설정되지 않았습니다'} · 마지막 점검 {time(s.at)}{ran.length > 0 && ok === 0 ? ' · 성공한 점검이 없어 수치를 표시하지 않습니다' : ''}</p>}
-      <ul className="space-y-2.5">{s.probes.items.map((p) => <ProbeRow key={p.id} p={p} lastOk={lastOk[p.id]} />)}</ul>
-      <p className="mt-3 text-xs ink2">대시보드 서버가 GET으로만 호출하며 원본에는 아무것도 쓰지 않습니다. 실패는 실제 서버 장애·인증 문제·DNS/네트워크/프록시 제한·측정 불가로 구분합니다. /metrics만 서버 간 토큰을 보내며, 토큰은 화면으로 내보내지 않습니다.</p>
-    </Card>
+    <section className="panel overflow-hidden" aria-labelledby="probe-title">
+      <div className="panel-head"><h3 id="probe-title">원본 연결 점검</h3><span className="flex items-center gap-2 text-xs ink2">{s.mode === 'live' ? `${ok}/${ran.length || 0}건 성공, ${time(s.at)}` : '실행 안 함'}<SrcBadge src={s.mode === 'mock' ? 'demo' : 'live'} /></span></div>
+      <ul>
+        {s.probes.items.map((p) => {
+          const expanded = open[p.id] ?? p.state === 'fail', seen = p.lastOkAt ?? lastOk[p.id];
+          return (
+            <li key={p.id} id={`probe-${p.id}`} className="border-b rule last:border-b-0" data-state={p.state} data-kind={p.kind ?? ''}>
+              <button type="button" aria-expanded={expanded} aria-controls={`probe-d-${p.id}`} onClick={() => setOpen((o) => ({ ...o, [p.id]: !expanded }))} className="row-btn grid grid-cols-[1rem_1fr_auto] items-center gap-x-3 gap-y-1 px-4 py-3 md:grid-cols-[1rem_minmax(12rem,1.4fr)_8rem_5rem_6rem_1fr]">
+                <span className="caret" aria-hidden>›</span>
+                <span className="min-w-0"><b className="text-sm">{p.label}</b></span>
+                <span className="text-sm"><Mark h={healthOf(p)} label={label(p)} /></span>
+                <span className="hidden text-sm tabular-nums md:block">{p.ms != null ? `${p.ms}ms` : '—'}</span>
+                <span className="hidden text-sm md:block">{p.status != null ? `HTTP ${p.status}` : '—'}</span>
+                <span className="code hidden truncate text-xs ink2 md:block">{p.revision ? `버전 ${rev(p.revision)}` : ''}</span>
+              </button>
+              {expanded && <div id={`probe-d-${p.id}`}><ProbeDetail p={p} lastOk={seen} /></div>}
+            </li>
+          );
+        })}
+      </ul>
+      <p className="border-t rule px-4 py-2.5 text-xs ink2">대시보드 서버가 GET으로만 호출합니다. 실패는 실제 서버 장애, 인증 문제, DNS·네트워크·프록시 제한, 측정 불가로 나눕니다. /metrics에만 서버 간 토큰을 보내며 토큰은 화면에 나오지 않습니다.</p>
+    </section>
   );
 }
 
-/** 개요 화면용: Live에서 점검이 하나라도 정상이 아닐 때만 나타나는 요약 알림. */
-export function ProbeAlert({ s }: { s: Snapshot }) {
-  if (s.mode !== 'live') return null;
-  const bad = s.probes.items.filter((p) => p.state !== 'ok');
-  if (!bad.length) return null;
-  const first = bad.find((p) => p.state === 'fail') ?? bad[0];
+/** 개요용 서비스 상태 표. 각 행은 인프라 화면의 해당 점검 상세로 이어진다. */
+export function ServiceTable({ s }: { s: Snapshot }) {
   return (
-    <div role="alert" className="glass flex flex-wrap items-start gap-3 p-4 text-sm" style={{ borderColor: 'color-mix(in srgb, var(--warn) 55%, var(--line))' }}>
-      <i className="dot warn mt-1.5" />
-      <div className="min-w-0 flex-1">
-        <b>{first.state === 'fail' ? `${first.label}: ${first.message}` : `점검 대기: ${first.message}`}</b>
-        {first.hint && <p className="mt-1 text-xs ink2">{first.hint}</p>}
-        {bad.length > 1 && <p className="mt-1 text-xs ink2">정상이 아닌 항목 {bad.length}개 — 인프라 화면에서 자세히 볼 수 있습니다.</p>}
-      </div>
+    <div className="overflow-x-auto">
+      <table className="table text-sm">
+        <thead><tr><th scope="col">서비스</th><th scope="col">상태</th><th scope="col" className="text-right">응답</th><th scope="col" className="hidden sm:table-cell">버전</th><th scope="col" className="hidden sm:table-cell">마지막 성공</th></tr></thead>
+        <tbody>{s.probes.items.map((p) => <tr key={p.id}>
+          <td><Link href={`/infrastructure#probe-${p.id}`} className="font-medium underline-offset-2 hover:underline">{p.label}</Link></td>
+          <td><Mark h={healthOf(p)} label={label(p)} />{p.fails ? <span className="ml-1.5 text-xs ink2">연속 {p.fails}회</span> : null}</td>
+          <td className="text-right tabular-nums">{p.ms != null ? `${p.ms}ms` : '—'}</td>
+          <td className="code hidden text-xs sm:table-cell">{rev(p.revision)}</td>
+          <td className="hidden tabular-nums text-xs ink2 sm:table-cell">{p.lastOkAt ? time(p.lastOkAt) : p.state === 'skipped' ? '—' : '없음'}</td>
+        </tr>)}</tbody>
+      </table>
     </div>
   );
 }
 
-/** 모니터 경고: 연속 실패·수용 인원·처리 지연·버전 불일치. 회복하면 자동으로 사라진다. */
+/** 모니터 경보. 장애는 ■와 붉은 선, 주의는 ▲. 회복하면 자동으로 사라진다. */
 export function MonitorAlerts({ s }: { s: Snapshot }) {
   if (s.mode !== 'live' || !s.monitor.alerts.length) return null;
+  const sorted = [...s.monitor.alerts].sort((a, b) => (a.level === b.level ? a.since - b.since : a.level === 'down' ? -1 : 1));
   return (
-    <div role="alert" className="glass space-y-2.5 p-4 text-sm" style={{ borderColor: 'color-mix(in srgb, var(--down) 45%, var(--line))' }}>
-      {s.monitor.alerts.map((a) => <div key={a.id} className="flex flex-wrap items-start gap-3"><i className={cn('dot pulse mt-1.5', a.level)} /><div className="min-w-0 flex-1"><b>{a.title}</b><p className="mt-0.5 text-xs ink2">{a.detail}</p></div><span className="text-xs tabular-nums ink2">{dt(a.since)}부터</span></div>)}
-    </div>
+    <section role="alert" aria-label="진행 중인 경보" className="panel overflow-hidden">
+      {sorted.map((a) => <div key={a.id} className={cn('alert border-b rule last:border-b-0', a.level)}><i aria-hidden className={cn('mark mt-1', a.level)} /><div className="min-w-0 flex-1"><b className="text-sm">{a.title}</b><p className="text-xs ink2">{a.detail}</p></div><span className="text-xs tabular-nums ink2">{dt(a.since)}부터</span></div>)}
+    </section>
   );
 }
 
-/** 수집기 자체의 상태: 주기, 횟수, 연속 실패 기준, 기록 보관 범위. */
+/** 설정이 빠진 점검 안내. 경보가 아니라 해야 할 일이다. */
+export function ProbeAlert({ s }: { s: Snapshot }) {
+  if (s.mode !== 'live') return null;
+  const todo = s.probes.items.filter((p) => p.state === 'skipped');
+  if (!todo.length) return null;
+  return (
+    <section className="panel flex flex-wrap items-start gap-3 p-3.5 text-sm">
+      <i aria-hidden className="mark unknown mt-1" />
+      <div className="min-w-0 flex-1"><b>설정이 필요한 점검 {todo.length}개</b>{todo.map((p) => <p key={p.id} className="mt-0.5 text-xs ink2">{p.label}: {p.hint ?? p.message}</p>)}</div>
+    </section>
+  );
+}
+
+/** 수집기 자체의 상태. */
 export function MonitorCard({ s }: { s: Snapshot }) {
   const m = s.monitor;
   return (
-    <Card lift={false}>
-      <CardHead title="지표 수집기" src={s.mode === 'mock' ? 'demo' : 'live'} />
-      <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-        <div><dt className="text-xs ink2">수집 주기</dt><dd className="num mt-1 text-2xl">{m.intervalMs / 1000}<span className="ml-1 text-xs ink2">초</span></dd></div>
-        <div><dt className="text-xs ink2">수집 횟수</dt><dd className="num mt-1 text-2xl">{m.collections}</dd></div>
-        <div><dt className="text-xs ink2">장애 판정</dt><dd className="mt-1">연속 {m.failThreshold}회 실패</dd></div>
-        <div><dt className="text-xs ink2">마지막 수집</dt><dd className="mt-1 tabular-nums">{m.collectedAt ? time(m.collectedAt) : '없음'}</dd></div>
+    <section className="panel">
+      <div className="panel-head"><h3>지표 수집기</h3><SrcBadge src={s.mode === 'mock' ? 'demo' : 'live'} /></div>
+      <dl className="grid grid-cols-2 divide-x divide-[color:var(--line)] sm:grid-cols-4">
+        {[['수집 간격', `${m.intervalMs / 1000}초`], ['수집 횟수', `${m.collections}회`], ['장애 판정', `연속 ${m.failThreshold}회 실패`], ['마지막 수집', m.collectedAt ? time(m.collectedAt) : '없음']].map(([k, v]) => <div key={k} className="px-4 py-3"><dt className="text-xs ink2">{k}</dt><dd className="num mt-1 text-lg">{v}</dd></div>)}
       </dl>
-      <p className="mt-3 text-xs ink2">{m.note} 수집 실패 {m.failures.length}건 기록 중 · 장애 화면에서 확인할 수 있습니다.</p>
-    </Card>
+      <p className="border-t rule px-4 py-2.5 text-xs ink2">기록 시작 {dt(m.startedAt)}. {m.note} 수집 실패 {m.failures.length}건은 <Link href="/incidents" className="underline">장애 화면</Link>에서 볼 수 있습니다.</p>
+    </section>
   );
 }

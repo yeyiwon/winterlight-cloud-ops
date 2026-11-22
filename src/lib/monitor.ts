@@ -81,7 +81,12 @@ export class Monitor {
   }
 
   private track(p: Probe, now: number): Probe {
-    if (p.state === 'skipped') return p;
+    if (p.state === 'skipped') {
+      // 설정 단계로 돌아간 점검(예: /metrics 미배포)은 성공을 보고하지 않으므로, 열린 장애를 여기서 닫는다.
+      const old = this.streaks.get(p.id);
+      if (old?.incident) { old.incident.status = 'resolved'; old.incident.resolvedAt = now; this.event(now, 'recovery', `${p.label} 장애 기록 종료`, '점검이 설정 필요 상태로 바뀌어 장애로 세지 않습니다.'); old.incident = null; old.fails = 0; old.firstFailAt = null; }
+      return p;
+    }
     const s = this.streaks.get(p.id) ?? { fails: 0, firstFailAt: null, lastOkAt: null, incident: null, revision: null };
     this.streaks.set(p.id, s);
     if (p.state === 'ok') {
@@ -119,7 +124,7 @@ export class Monitor {
     return {
       intervalMs: this.intervalMs, startedAt: this.startedAt, collectedAt: this.collectedAt, nextAt: this.collectedAt ? this.collectedAt + this.intervalMs : now, collections: this.collections, failThreshold: this.failThreshold,
       alerts: this.alerts(extra), failures: [...this.failures].reverse().slice(0, 50), timeline: [...this.timeline].sort((a, b) => b.at - a.at).slice(0, 50),
-      note: `이 대시보드 서버가 ${new Date(this.startedAt).toISOString()}부터 메모리에 보관한 기록입니다. 서버 인스턴스가 바뀌면 처음부터 다시 쌓입니다.`,
+      note: '이 대시보드 서버가 시작된 뒤 메모리에 보관한 기록입니다. 서버 인스턴스가 바뀌면 처음부터 다시 쌓입니다.',
     };
   }
 }

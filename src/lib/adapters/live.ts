@@ -63,13 +63,19 @@ export const createLiveAdapter = (env: LiveEnv, f: Fetch = fetch, opts: LiveOpti
     const parsed = parseRtMetrics(results[3].body);
     const raw = results.map((r) => r.probe);
     if (raw[3].state === 'ok' && !parsed) Object.assign(raw[3], { state: 'fail', kind: 'format', message: '지표 응답의 형식이 예상과 다릅니다.', hint: '원본 /metrics 버전과 대시보드 버전이 맞는지 확인하세요.', detail: '필수 숫자 필드 누락' });
-    const rev = revisionOf(raw.filter((p) => p.id !== 'realtime-metrics'));
-    const extra: Alert[] = rev.mismatch ? [{ id: 'revision', level: 'warn', title: '서비스 간 배포 버전 불일치', detail: String(rev.value.value), since: now }] : [];
+    // /metrics 404는 장애가 아니라 아직 배포하지 않은 설정 단계다. 장애·경보를 만들지 않고 '설정 필요'로 둔다.
+    if (raw[3].state === 'fail' && raw[3].kind === 'not-found') Object.assign(raw[3], { state: 'skipped' });
+    // 프런트엔드와 Sites API는 같은 커밋으로 함께 배포된다. 실시간 Worker는 자기 코드가 바뀐 배포에서만 다시 배포되므로
+    // (원본 docs/DEPLOYMENT.md v60), Worker 버전이 뒤처진 것만으로는 경고하지 않는다.
+    const rev = revisionOf(raw.filter((p) => p.id === 'web-health' || p.id === 'release'));
+    const rtRev = raw[2].state === 'ok' && raw[2].revision && rev.value.value && !rev.mismatch && !String(rev.value.value).startsWith(raw[2].revision.slice(0, 7)) ? raw[2].revision.slice(0, 7) : null;
+    if (rtRev) rev.value = { ...rev.value, note: `${rev.value.note ? `${rev.value.note}. ` : ''}실시간 Worker는 ${rtRev}이며, Worker 코드가 바뀐 배포에서만 갱신됩니다.` };
+    const extra: Alert[] = rev.mismatch ? [{ id: 'revision', level: 'warn', title: '프런트엔드와 API의 배포 버전 불일치', detail: `${String(rev.value.value)}. 배포가 진행 중이거나 한쪽만 배포되었을 수 있습니다.`, since: now }] : [];
     const items = mon.observe(raw, parsed, now);
     const [health, release, realtime, metricsProbe] = items;
     const rt: RtMetrics | null = parsed, d = rt ? mon.derived : null, at = rt?.at ?? now;
-    const status = overallStatus(items);
-    const needRt = <T = number,>(what: string): M<T> => metricsProbe.state === 'skipped' ? NA<T>(`${what}: WINTERLIGHT_METRICS_TOKEN 설정 필요`) : metricsProbe.state === 'fail' ? UNAVAIL<T>(`${what}: ${metricsProbe.message ?? '지표 수집 실패'}`) : NA<T>(`${what}: 다음 수집 때 계산됩니다(직전 표본 필요)`);
+    const status = overallStatus(items, rev.mismatch);
+    const needRt = <T = number,>(what: string): M<T> => metricsProbe.state === 'skipped' ? NA<T>(`${what}: ${metricsProbe.message ?? 'WINTERLIGHT_METRICS_TOKEN 설정 필요'}`) : metricsProbe.state === 'fail' ? UNAVAIL<T>(`${what}: ${metricsProbe.message ?? '지표 수집 실패'}`) : NA<T>(`${what}: 다음 수집 때 계산됩니다(직전 표본 필요)`);
     const rpm: M = cf?.ok ? live(Math.round(cf.value.requests / 60), SRC.cf, now, '최근 1시간 평균') : NA(cf && !cf.ok ? `Cloudflare API 실패: ${cf.error}` : 'Cloudflare 읽기 전용 토큰 필요');
     const err: M = cf?.ok && cf.value.requests ? live(+((cf.value.errors / cf.value.requests) * 100).toFixed(2), SRC.cf, now, '최근 1시간 Workers 오류율') : NA(cf && !cf.ok ? `Cloudflare API 실패: ${cf.error}` : 'Cloudflare 읽기 전용 토큰 필요');
     const apiMs = mon.points.map((p) => p.api).filter((v): v is number => v != null).slice(-20);
@@ -97,7 +103,7 @@ export const createLiveAdapter = (env: LiveEnv, f: Fetch = fetch, opts: LiveOpti
       infra: {
         workers: tagged(healthOf(health), SRC.health, health), realtime: tagged(healthOf(realtime), SRC.rt, realtime), d1, vercel: tagged(healthOf(release), SRC.release, release),
         doReq: NA('Cloudflare GraphQL(Durable Objects) 연동 필요'),
-        doMsgs: rt ? live(rt.received + rt.sent, SRC.metrics, at, `DO 시작(${new Date(rt.since).toISOString()}) 이후 수신 ${rt.received.toLocaleString()} + 송신 ${rt.sent.toLocaleString()}`) : needRt('DO 메시지'),
+        doMsgs: rt ? live(rt.received + rt.sent, SRC.metrics, at, `Durable Object 시작 이후 누적: 수신 ${rt.received.toLocaleString('ko-KR')}, 송신 ${rt.sent.toLocaleString('ko-KR')}`) : needRt('DO 메시지'),
         d1Reads: NA('Cloudflare GraphQL(D1) 연동 필요'), d1Writes: NA('Cloudflare GraphQL(D1) 연동 필요'), d1Storage: NA('Cloudflare GraphQL(D1) 연동 필요'), bandwidth: NA('Vercel 사용량 API 연동 필요'), probeMs: pm,
       },
       multiplayer: {
